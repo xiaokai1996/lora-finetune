@@ -60,18 +60,43 @@ def main():
 
     # ===================== 4. 加载并格式化数据 =====================
     def format_example(example):
-        """将数据格式化为Qwen的对话格式"""
-        prompt = f"<|im_start|>user\n{example['input']}<|im_end|>\n<|im_start|>assistant\n{example['output']}<|im_end|>"
-        # Tokenize
-        tokenized = tokenizer(
-            prompt,
-            truncation=True,
-            max_length=512,  # 限制长度
-            padding=False,   # 交给DataCollator处理padding
-            return_tensors=None
-        )
-        tokenized["labels"] = tokenized["input_ids"].copy()
-        return tokenized
+        """将数据格式化为Qwen的对话格式，并进行Masking和截断处理"""
+        # 1. 分别处理Input和Output
+        user_text = f"<|im_start|>user\n{example['input']}<|im_end|>\n<|im_start|>assistant\n"
+        assistant_text = f"{example['output']}<|im_end|>"
+        
+        # 2. Tokenize
+        user_tokens = tokenizer(user_text, add_special_tokens=False)["input_ids"]
+        assistant_tokens = tokenizer(assistant_text, add_special_tokens=False)["input_ids"]
+        
+        # 3. 动态截断（保留完整的回复，截断过长的输入）
+        # 预留给回复的长度
+        max_seq_length = 2048  # 增加上下文长度到2048
+        if len(assistant_tokens) > max_seq_length:
+            # 如果回复本身就超长，强制截断回复（极端情况）
+            assistant_tokens = assistant_tokens[:max_seq_length]
+            user_tokens = []
+        else:
+            # 剩余空间给输入
+            remaining_length = max_seq_length - len(assistant_tokens)
+            if len(user_tokens) > remaining_length:
+                # 截断输入（保留后面的部分通常更有用，或者保留前面的部分）
+                # 这里选择保留前面的部分（OCR文档通常开头包含关键信息），如果需要保留末尾改为 user_tokens[-remaining_length:]
+                user_tokens = user_tokens[:remaining_length]
+        
+        # 4. 拼接
+        input_ids = user_tokens + assistant_tokens
+        attention_mask = [1] * len(input_ids)
+        
+        # 5. 构建Labels（Mask掉User部分）
+        # User部分设为-100（不计算Loss），Assistant部分保留原ID
+        labels = [-100] * len(user_tokens) + assistant_tokens
+        
+        return {
+            "input_ids": input_ids,
+            "attention_mask": attention_mask,
+            "labels": labels
+        }
     
     # 加载JSONL数据
     dataset = load_dataset("json", data_files=DATA_PATH)["train"]
@@ -83,6 +108,7 @@ def main():
         output_dir=OUTPUT_DIR,
         num_train_epochs=3,
         per_device_train_batch_size=1,
+        gradient_accumulation_steps=8,  # 梯度累积，模拟batch_size=8，稳定训练
         learning_rate=3e-4,        
         logging_steps=2,           
         # 核心修改1：开启checkpoint保存
